@@ -116,81 +116,88 @@ export class HttpClient {
 	// =========================
 
 	private async downloadKaiOS3(url: string): Promise<void> {
-		try {
-			const response = await fetch(url);
+	try {
+		const response = await fetch(url);
 
-			if (!response.body) {
-				throw new Error('ReadableStream not supported');
-			}
+		if (!response.body) {
+			throw new Error('ReadableStream not supported');
+		}
 
-			const reader = response.body.getReader();
+		const reader = response.body.getReader();
+		const chunkLimit = this.options.chunkByteLimit;
+		
+		let chunk: Chunk = {
+			part: 1,
+			startBytes: 0,
+			endBytes: 0,
+			bytes: 0,
+			totalBytes: Number(response.headers.get('Content-Length')) || 0,
+			data: new ArrayBuffer(0)
+		};
 
-			let part = 1;
-			let receivedBytes = 0;
+		let isFinished = false;
 
-			// Buffer für Chunk-Splitting (wichtig für gleiche Logik wie KaiOS 2)
-			let buffer = new Uint8Array(0);
+		while (true) {
+			const { done, value } = await reader.read();
+			isFinished = done;
 
-			const totalBytes =
-				Number(response.headers.get('Content-Length')) || 0;
+			if (value) {
+				// Wie in KaiOS 2: neue Daten zum Chunk hinzufügen
+				const bytesNeeded = chunkLimit - chunk.data.byteLength;
+				const bytesBefore = chunk.data.byteLength;
 
-			while (true) {
-				const { done, value } = await reader.read();
-
-				if (done) break;
-
-				// append new data
-				const newBuffer = new Uint8Array(
-					buffer.length + value.length
+				chunk.data = this.appendChunk(
+					chunk.data,
+					value.slice(0, bytesNeeded).buffer
 				);
-				newBuffer.set(buffer, 0);
-				newBuffer.set(value, buffer.length);
 
-				buffer = newBuffer;
-				receivedBytes += value.length;
+				chunk.bytes = chunk.data.byteLength;
+				chunk.endBytes = chunk.startBytes + chunk.data.byteLength;
 
-				// split into same chunk size as KaiOS 2
-				while (buffer.length >= this.options.chunkByteLimit) {
-					const chunkData = buffer.slice(
-						0,
-						this.options.chunkByteLimit
-					);
+				const remainingBytes = value.length - bytesNeeded;
 
-					buffer = buffer.slice(this.options.chunkByteLimit);
+				// Chunk senden wenn voll ODER am Ende
+				if (
+					chunk.data.byteLength >= chunkLimit ||
+					(isFinished && chunk.data.byteLength > 0)
+				) {
+					this.onProgress({ ...chunk });
 
-					this.onProgress({
-						part,
-						startBytes: receivedBytes - buffer.length - chunkData.length,
-						endBytes: receivedBytes - buffer.length,
-						bytes: chunkData.length,
-						totalBytes,
-						data: chunkData.buffer
-					});
-
-					part++;
+					// Restliche Daten in nächsten Chunk
+					if (remainingBytes > 0) {
+						chunk = {
+							part: chunk.part + 1,
+							startBytes: chunk.endBytes,
+							endBytes: chunk.endBytes,
+							bytes: 0,
+							totalBytes: chunk.totalBytes,
+							data: value.slice(bytesNeeded).buffer
+						};
+					} else {
+						chunk = {
+							part: chunk.part + 1,
+							startBytes: chunk.endBytes,
+							endBytes: chunk.endBytes,
+							bytes: 0,
+							totalBytes: chunk.totalBytes,
+							data: new ArrayBuffer(0)
+						};
+					}
 				}
 			}
 
-			// flush remaining buffer
-			if (buffer.length > 0) {
-				this.onProgress({
-					part,
-					startBytes: receivedBytes - buffer.length,
-					endBytes: receivedBytes,
-					bytes: buffer.length,
-					totalBytes,
-					data: buffer.buffer
-				});
-			}
-
-			this.onComplete({
-				totalBytes: receivedBytes
-			} as Progress);
-
-		} catch (err) {
-			this.onError(err as Error);
+			if (isFinished) break;
 		}
+
+		this.onComplete({ totalBytes: chunk.totalBytes } as Progress);
+
+	} catch (err) {
+		this.onError(err as Error);
 	}
+}
+
+
+
 
 	// =========================
 	// HELPERS
@@ -208,4 +215,4 @@ export class HttpClient {
 
 type HttpClientOptions = {
 	chunkByteLimit: number;
-};
+};	
